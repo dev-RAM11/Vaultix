@@ -1,14 +1,14 @@
-'use client';
+﻿'use client';
 
 import { useFormContext } from 'react-hook-form';
-import { CreateEscrowFormData } from '@/lib/escrow-schema';
+import { CreateEscrowFormData, calculateEscrowFees } from '@/lib/escrow-schema';
 
 export default function ReviewStep() {
   const { getValues } = useFormContext<CreateEscrowFormData>();
   const values = getValues();
 
   const formatDate = (date: Date) => {
-    if (!date) return 'Not set';
+    if (!date || !(date instanceof Date) || isNaN(date.getTime())) return 'Not set';
     return new Intl.DateTimeFormat('en-US', {
       dateStyle: 'medium',
       timeStyle: 'short',
@@ -17,13 +17,14 @@ export default function ReviewStep() {
 
   const milestones = values.milestones ?? [];
   const conditions = values.conditions ?? [];
+  const feeSummary = calculateEscrowFees(values.amount, values.asset || 'XLM');
 
   return (
     <div className="space-y-6">
       <div className="space-y-4">
         <h2 className="text-xl font-semibold text-gray-900">Review & Confirm</h2>
         <p className="text-sm text-gray-500">
-          Please review the details below carefully before creating the escrow.
+          Please review the agreement summary and fee breakdown carefully before signing the escrow transaction.
         </p>
 
         <div className="bg-gray-50 rounded-lg p-6 space-y-4 border border-gray-200">
@@ -82,7 +83,7 @@ export default function ReviewStep() {
                 {milestones.map((m, i) => (
                   <li key={i} className="flex justify-between text-sm text-gray-700">
                     <span>{m.description}</span>
-                    <span className="font-medium text-blue-600">{m.amount} XLM</span>
+                    <span className="font-medium text-blue-600">{m.amount} {values.asset || 'XLM'}</span>
                   </li>
                 ))}
               </ul>
@@ -106,6 +107,35 @@ export default function ReviewStep() {
               </ul>
             </div>
           )}
+
+          {/* Fee & Settlement Breakdown */}
+          <div className="border-t border-gray-200 pt-4" data-testid="fee-summary">
+            <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wider">Fee & Settlement Summary</h3>
+            <dl className="mt-2 space-y-1.5 text-sm">
+              <div className="flex justify-between text-gray-600">
+                <dt>Escrow Principal</dt>
+                <dd className="font-medium text-gray-900">
+                  {feeSummary.principalAmount} {feeSummary.asset}
+                </dd>
+              </div>
+              <div className="flex justify-between text-gray-600">
+                <dt>Platform Fee ({feeSummary.platformFeePercent})</dt>
+                <dd className="font-medium text-gray-900">
+                  {feeSummary.platformFeeAmount} {feeSummary.asset}
+                </dd>
+              </div>
+              <div className="flex justify-between text-gray-600">
+                <dt>Estimated Network Fee</dt>
+                <dd className="font-medium text-gray-900">{feeSummary.networkFeeXlm} XLM</dd>
+              </div>
+              <div className="flex justify-between border-t border-gray-200 pt-2 font-semibold text-gray-900">
+                <dt>Total Estimated Cost</dt>
+                <dd data-testid="fee-summary-total">
+                  {feeSummary.totalAssetAmount} {feeSummary.asset}
+                </dd>
+              </div>
+            </dl>
+          </div>
         </div>
 
         <div className="rounded-md bg-yellow-50 p-4 border border-yellow-200">

@@ -1,6 +1,19 @@
-import { basicInfoSchema, partiesSchema, termsSchema } from './escrow-schema';
+﻿import {
+  basicInfoSchema,
+  partiesSchema,
+  termsSchema,
+  milestonesSchema,
+  calculateEscrowFees,
+  saveEscrowDraft,
+  loadEscrowDraft,
+  clearEscrowDraft,
+} from './escrow-schema';
 
-describe('Escrow Validation Schemas', () => {
+describe('Escrow Validation Schemas & Draft Utilities', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   describe('basicInfoSchema', () => {
     it('should validate valid basic info', () => {
       const validData = {
@@ -68,8 +81,8 @@ describe('Escrow Validation Schemas', () => {
   describe('termsSchema', () => {
     it('should validate valid terms', () => {
       const futureDate = new Date();
-      futureDate.setFullYear(futureDate.getFullYear() + 1); // Way in the future
-      
+      futureDate.setFullYear(futureDate.getFullYear() + 1);
+
       const validData = {
         amount: '100.5',
         asset: 'XLM',
@@ -82,7 +95,7 @@ describe('Escrow Validation Schemas', () => {
     it('should reject negative amount', () => {
       const futureDate = new Date();
       futureDate.setFullYear(futureDate.getFullYear() + 1);
-      
+
       const result = termsSchema.safeParse({
         amount: '-10',
         asset: 'XLM',
@@ -96,8 +109,8 @@ describe('Escrow Validation Schemas', () => {
 
     it('should reject past deadline', () => {
       const pastDate = new Date();
-      pastDate.setFullYear(pastDate.getFullYear() - 1); // Definitely in the past
-      
+      pastDate.setFullYear(pastDate.getFullYear() - 1);
+
       const result = termsSchema.safeParse({
         amount: '100',
         asset: 'XLM',
@@ -107,6 +120,58 @@ describe('Escrow Validation Schemas', () => {
       if (!result.success) {
         expect(result.error.flatten().fieldErrors.deadline).toContain('Deadline must be in the future');
       }
+    });
+  });
+
+  describe('milestonesSchema', () => {
+    it('validates milestone items and rejects invalid milestone entries', () => {
+      expect(
+        milestonesSchema.safeParse({
+          milestones: [{ description: 'Design phase', amount: '50' }],
+        }).success,
+      ).toBe(true);
+
+      expect(
+        milestonesSchema.safeParse({
+          milestones: [{ description: 'ab', amount: '0' }],
+        }).success,
+      ).toBe(false);
+    });
+  });
+
+  describe('calculateEscrowFees', () => {
+    it('computes platform fee, network fee, and total cost accurately', () => {
+      const summary = calculateEscrowFees('200', 'XLM');
+      expect(summary.principalAmount).toBe('200');
+      expect(summary.platformFeeAmount).toBe('1');
+      expect(summary.platformFeePercent).toBe('0.50%');
+      expect(summary.networkFeeXlm).toBe('0.00001');
+      expect(summary.totalAssetAmount).toBe('201.00001');
+    });
+  });
+
+  describe('draft storage helpers', () => {
+    it('saves, restores, and clears draft state from localStorage', () => {
+      const deadline = new Date('2027-05-01T12:00:00.000Z');
+      saveEscrowDraft(
+        {
+          title: 'Saved Draft Title',
+          amount: '250',
+          asset: 'USDC',
+          deadline,
+        },
+        3,
+      );
+
+      const loaded = loadEscrowDraft();
+      expect(loaded).not.toBeNull();
+      expect(loaded?.step).toBe(3);
+      expect(loaded?.values.title).toBe('Saved Draft Title');
+      expect(loaded?.values.amount).toBe('250');
+      expect(loaded?.values.deadline?.toISOString()).toBe(deadline.toISOString());
+
+      clearEscrowDraft();
+      expect(loadEscrowDraft()).toBeNull();
     });
   });
 });

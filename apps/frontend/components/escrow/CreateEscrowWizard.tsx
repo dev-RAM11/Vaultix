@@ -1,10 +1,16 @@
-"use client";
+﻿"use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useForm, FormProvider } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { createEscrowSchema, CreateEscrowFormData } from "@/lib/escrow-schema";
+import {
+  createEscrowSchema,
+  CreateEscrowFormData,
+  saveEscrowDraft,
+  loadEscrowDraft,
+  clearEscrowDraft,
+} from "@/lib/escrow-schema";
 import TemplateSelector from "./create/TemplateSelector";
 import BasicInfoStep from "./create/BasicInfoStep";
 import PartiesStep from "./create/PartiesStep";
@@ -19,6 +25,7 @@ import {
   Loader2,
   AlertCircle,
   Save,
+  RotateCcw,
 } from "lucide-react";
 import { useWallet } from "@/app/contexts/WalletContext";
 import {
@@ -50,10 +57,26 @@ const STEPS = [
     shortTitle: "Terms",
     fields: ["amount", "deadline", "asset"],
   },
-  { id: "milestones", title: "Milestones", shortTitle: "Miles.", fields: [] },
-  { id: "conditions", title: "Conditions", shortTitle: "Conds.", fields: [] },
+  {
+    id: "milestones",
+    title: "Milestones",
+    shortTitle: "Miles.",
+    fields: ["milestones"],
+  },
+  {
+    id: "conditions",
+    title: "Conditions",
+    shortTitle: "Conds.",
+    fields: ["conditions"],
+  },
   { id: "review", title: "Review", shortTitle: "Review", fields: [] },
 ];
+
+const DEFAULT_FORM_VALUES: Partial<CreateEscrowFormData> = {
+  asset: "XLM",
+  milestones: [],
+  conditions: [],
+};
 
 export default function CreateEscrowWizard() {
   const [currentStep, setCurrentStep] = useState(0);
@@ -62,12 +85,14 @@ export default function CreateEscrowWizard() {
   const [txHash, setTxHash] = useState<string | null>(null);
   const [createdEscrowId, setCreatedEscrowId] = useState<string | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [draftRestored, setDraftRestored] = useState(false);
   const [selectedTemplateId, setSelectedTemplateId] = useState<
     string | undefined
   >();
   const [showSaveTemplate, setShowSaveTemplate] = useState(false);
   const [templateName, setTemplateName] = useState("");
   const [templateDescription, setTemplateDescription] = useState("");
+  const hasHydratedDraft = useRef(false);
   const creationIntent = useRef<{
     id: string;
     payload: CreateEscrowPayload;
@@ -87,36 +112,96 @@ export default function CreateEscrowWizard() {
   const methods = useForm<CreateEscrowFormData>({
     resolver: zodResolver(createEscrowSchema),
     mode: "onChange",
-    defaultValues: { asset: "XLM", milestones: [], conditions: [] },
+    defaultValues: DEFAULT_FORM_VALUES,
   });
 
-  const { trigger, handleSubmit, reset, watch } = methods;
+  const { trigger, handleSubmit, reset, watch, getValues } = methods;
+
+  // Restore draft from localStorage on initial mount
+  useEffect(() => {
+    const saved = loadEscrowDraft();
+    if (saved) {
+      reset({
+        ...DEFAULT_FORM_VALUES,
+        ...saved.values,
+      });
+      const clampedStep = Math.min(Math.max(saved.step, 0), STEPS.length - 1);
+      setCurrentStep(clampedStep);
+      setDraftRestored(true);
+    }
+    hasHydratedDraft.current = true;
+  }, [reset]);
+
+  // Autosave draft to localStorage whenever form values or step change
+  useEffect(() => {
+    const subscription = watch((formValues) => {
+      if (!hasHydratedDraft.current || txHash) return;
+      saveEscrowDraft(formValues as Partial<CreateEscrowFormData>, currentStep);
+    });
+    return () => subscription.unsubscribe();
+  }, [watch, currentStep, txHash]);
+
+  const handleDiscardDraft = () => {
+    clearEscrowDraft();
+    reset(DEFAULT_FORM_VALUES);
+    setCurrentStep(0);
+    setDraftRestored(false);
+    setSubmitError(null);
+  };
 
   const handleTemplateSelect = (formData: Partial<CreateEscrowFormData>) => {
-    reset({
-      asset: "XLM",
-      milestones: [],
-      conditions: [],
+    const nextValues = {
+      ...DEFAULT_FORM_VALUES,
       ...formData,
-    });
+    };
+    reset(nextValues);
+    saveEscrowDraft(nextValues, currentStep);
   };
 
   const nextStep = async () => {
     if (currentStep === 0) {
-      setCurrentStep((prev) => prev + 1);
+      const nextIdx = 1;
+      setCurrentStep(nextIdx);
+      saveEscrowDraft(getValues(), nextIdx);
       return;
     }
     const fields = STEPS[currentStep].fields as any[];
-    const isValid = await trigger(fields);
-    if (isValid) {
-      setCurrentStep((prev) => Math.min(prev + 1, STEPS.length - 1));
-      setSubmitError(null);
+    const isValid = fields.length > 0 ? await trigger(fields) : true;
+    if (!isValid) return;
+
+    if (STEPS[currentStep].id === "milestones") {
+      const currentValues = getValues();
+      const milestones = currentValues.milestones ?? [];
+      if (milestones.length > 0) {
+        const totalEscrowAmount = parseFloat(currentValues.amount || "0");
+        const milestoneSum = milestones.reduce(
+          (sum, item) => sum + (parseFloat(item.amount) || 0),
+          0,
+        );
+        if (
+          Number.isFinite(totalEscrowAmount) &&
+          totalEscrowAmount > 0 &&
+          milestoneSum > totalEscrowAmount + 1e-7
+        ) {
+          setSubmitError(
+            "Total milestone amounts cannot exceed the total escrow amount.",
+          );
+          return;
+        }
+      }
     }
+
+    const nextIdx = Math.min(currentStep + 1, STEPS.length - 1);
+    setCurrentStep(nextIdx);
+    setSubmitError(null);
+    saveEscrowDraft(getValues(), nextIdx);
   };
 
   const prevStep = () => {
-    setCurrentStep((prev) => Math.max(prev - 1, 0));
+    const prevIdx = Math.max(currentStep - 1, 0);
+    setCurrentStep(prevIdx);
     setSubmitError(null);
+    saveEscrowDraft(getValues(), prevIdx);
   };
 
   const onSubmit = async (data: CreateEscrowFormData) => {
@@ -175,6 +260,8 @@ export default function CreateEscrowWizard() {
           "The network has not confirmed this escrow yet. Retry to check the same submission.",
         );
       }
+      clearEscrowDraft();
+      setDraftRestored(false);
       setCreatedEscrowId(settled.escrowId);
       setTxHash(settled.transactionHash);
       success("Escrow creation confirmed on Stellar.");
@@ -186,7 +273,6 @@ export default function CreateEscrowWizard() {
           message,
         )
       ) {
-        // The network reported a terminal result, so a new attempt needs a new sequence and intent.
         creationIntent.current = null;
         setHasSignedIntent(false);
       }
@@ -302,6 +388,23 @@ export default function CreateEscrowWizard() {
   return (
     <div className="max-w-4xl mx-auto">
       <div className="bg-card border border-border shadow-sm rounded-xl overflow-hidden">
+        {draftRestored && (
+          <div
+            role="status"
+            className="px-4 sm:px-8 py-2.5 bg-muted/60 border-b border-border flex items-center justify-between text-xs text-muted-foreground"
+          >
+            <span>Saved draft restored automatically.</span>
+            <button
+              type="button"
+              onClick={handleDiscardDraft}
+              className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Clear Draft
+            </button>
+          </div>
+        )}
+
         {/* Progress bar */}
         <div className="px-4 sm:px-8 pt-6 pb-2 border-b border-border">
           <div className="flex items-center justify-between mb-3 sm:hidden">

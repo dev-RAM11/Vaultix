@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import CreateEscrowWizard from './CreateEscrowWizard';
@@ -7,6 +7,7 @@ import { ToastProvider } from '@/app/contexts/ToastProvider';
 import { useWallet } from '@/app/contexts/WalletContext';
 import { AssetService } from '@/services/assets';
 import { prepareEscrowCreation, submitEscrowCreation } from '@/services/escrow-creation';
+import { ESCROW_DRAFT_STORAGE_KEY, saveEscrowDraft } from '@/lib/escrow-schema';
 
 jest.mock('@/app/contexts/WalletContext', () => ({ useWallet: jest.fn() }));
 jest.mock('@/services/escrow-creation', () => ({
@@ -28,7 +29,7 @@ jest.mock('@/services/assets', () => ({
 }));
 
 jest.mock('next/link', () => {
-  return ({ children, href }: { children: React.ReactNode, href: string }) => (
+  return ({ children, href }: { children: React.ReactNode; href: string }) => (
     <a href={href}>{children}</a>
   );
 });
@@ -59,6 +60,7 @@ describe('CreateEscrowWizard', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    window.localStorage.clear();
     (useWallet as jest.Mock).mockReturnValue({
       activeAccount: { publicKey: VALID_STELLAR_ADDRESS, walletType: 'freighter', network: 'testnet' },
       signTransaction,
@@ -103,59 +105,102 @@ describe('CreateEscrowWizard', () => {
     expect(screen.getAllByText('XLM', { exact: true }).length).toBeGreaterThan(0);
   });
 
-  it('navigates through all steps with valid data', async () => {
+  it('validates milestone items and displays fee summary on the review step', async () => {
     const user = userEvent.setup();
     renderWizard();
     await goToBasicInfo(user);
-    
-    // Step 0: Basic Info
-    const title = screen.getByLabelText(/Title/i);
-    const category = screen.getByLabelText(/Category/i);
-    const description = screen.getByLabelText(/Description/i);
 
-    await user.type(title, 'Project Development');
-    await user.selectOptions(category, 'service');
-    await user.type(description, 'This is a long enough description for the test.');
-    
+    await user.type(screen.getByLabelText(/Title/i), 'Project Development');
+    await user.selectOptions(screen.getByLabelText(/Category/i), 'service');
+    await user.type(screen.getByLabelText(/Description/i), 'This is a long enough description for the test.');
     await user.click(screen.getByRole('button', { name: /Next/i }));
-    
-    // Step 1: Parties
+
     await waitFor(() => expect(screen.getByText(/Counterparty Address/i)).toBeInTheDocument());
     await user.type(screen.getByLabelText(/Counterparty Address/i), VALID_STELLAR_ADDRESS);
     await user.click(screen.getByRole('button', { name: /Next/i }));
-    
-    // Step 2: Terms
+
     await waitFor(() => expect(screen.getByText(/Amount/i)).toBeInTheDocument());
     await user.type(screen.getByLabelText(/Amount/i), '100');
-    
+
     const dateInput = screen.getByLabelText(/Deadline/i);
     const futureDate = new Date();
     futureDate.setDate(futureDate.getDate() + 7);
-    const dateString = futureDate.toISOString().slice(0, 16); 
-    fireEvent.change(dateInput, { target: { value: dateString } });
-    
-    await user.click(screen.getByRole('button', { name: /Next/i }));
-    
-    // Step 3: Optional milestones
-    await waitFor(() =>
-      expect(screen.getByRole('heading', { name: 'Milestones' })).toBeInTheDocument()
-    );
+    fireEvent.change(dateInput, { target: { value: futureDate.toISOString().slice(0, 16) } });
+
     await user.click(screen.getByRole('button', { name: /Next/i }));
 
-    // Step 4: Optional conditions
+    // Step: Milestones — add an invalid milestone first and verify step validation blocks navigation
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Milestones' })).toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: /Add Milestone/i }));
+    await user.click(screen.getByRole('button', { name: /Next/i }));
+    await waitFor(() => {
+      expect(screen.getByText('Description must be at least 3 characters')).toBeInTheDocument();
+    });
+
+    // Fill milestone and advance
+    await user.type(screen.getByPlaceholderText(/Initial design delivered/i), 'Initial milestone');
+    await user.type(screen.getByPlaceholderText('0.00'), '100');
+    await user.click(screen.getByRole('button', { name: /Next/i }));
+
+    // Step: Conditions
     await waitFor(() => expect(screen.getByText(/Release Conditions/i)).toBeInTheDocument());
     await user.click(screen.getByRole('button', { name: /Next/i }));
 
-    // Step 5: Review
+    // Step: Review — check summary and fee breakdown
     await waitFor(() => expect(screen.getByText(/Review & Confirm/i)).toBeInTheDocument());
     expect(screen.getByText('Project Development')).toBeInTheDocument();
+    expect(screen.getByTestId('fee-summary')).toBeInTheDocument();
+    expect(screen.getByText(/Platform Fee \(0\.50\%\)/i)).toBeInTheDocument();
+    expect(screen.getByText('0.00001 XLM')).toBeInTheDocument();
+    expect(screen.getByTestId('fee-summary-total')).toHaveTextContent('100.50001 XLM');
+  });
+
+  it('restores saved draft from localStorage and clears draft on submit', async () => {
+    const futureDate = new Date();
+    futureDate.setDate(futureDate.getDate() + 7);
+
+    saveEscrowDraft(
+      {
+        title: 'Restored Draft Escrow',
+        description: 'Restored description from localStorage draft.',
+        category: 'service',
+        counterpartyAddress: VALID_STELLAR_ADDRESS,
+        amount: '50',
+        asset: 'XLM',
+        deadline: futureDate,
+        milestones: [],
+        conditions: [],
+      },
+      6,
+    );
+
+    (prepareEscrowCreation as jest.Mock).mockImplementation((intentId) =>
+      Promise.resolve({ intentId, chainEscrowId: '7010', unsignedXdr: 'unsigned-xdr' }),
+    );
+    signTransaction.mockResolvedValue('signed-xdr');
+    (submitEscrowCreation as jest.Mock).mockResolvedValue({
+      escrowId: 'escrow-draft-cleared',
+      transactionHash: 'tx-hash-draft-cleared',
+      status: 'confirmed',
+    });
+
+    const user = userEvent.setup();
+    renderWizard();
+
+    expect(await screen.findByText(/Saved draft restored automatically/i)).toBeInTheDocument();
+    expect(screen.getByText('Restored Draft Escrow')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /Create Escrow/i }));
+    expect(await screen.findByText('Escrow Created Successfully!')).toBeInTheDocument();
+    expect(window.localStorage.getItem(ESCROW_DRAFT_STORAGE_KEY)).toBeNull();
   });
 
   it('retains the validated form and reuses its intent after wallet signing is rejected', async () => {
     (prepareEscrowCreation as jest.Mock).mockImplementation((intentId) =>
       Promise.resolve({ intentId, chainEscrowId: '7001', unsignedXdr: 'unsigned-xdr' }),
     );
-    signTransaction.mockRejectedValueOnce(new Error('User rejected the transaction.'))
+    signTransaction
+      .mockRejectedValueOnce(new Error('User rejected the transaction.'))
       .mockResolvedValueOnce('signed-xdr');
     (submitEscrowCreation as jest.Mock).mockResolvedValue({
       escrowId: 'db-escrow-id',
@@ -185,7 +230,7 @@ describe('CreateEscrowWizard', () => {
 
     await user.click(screen.getByRole('button', { name: /Create Escrow/i }));
     expect(await screen.findByText('User rejected the transaction.')).toBeInTheDocument();
-    expect(screen.getByText('1.25 XLM')).toBeInTheDocument();
+    expect(screen.getAllByText('1.25 XLM').length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole('button', { name: /Create Escrow/i }));
     expect(await screen.findByText('Escrow Created Successfully!')).toBeInTheDocument();
